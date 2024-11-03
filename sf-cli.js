@@ -7,6 +7,8 @@ import { green, bold } from "https://deno.land/std@0.224.0/fmt/colors.ts";
 import { existsSync } from "https://deno.land/std@0.224.0/fs/exists.ts";
 
 const DEFAULT_SITEROOT = "http://localhost/";
+const DEFAULT_OUTPUT_DIRNAME = "docs";
+const DEFAULT_SRC_DIRNAME = "src";
 
 // Update the action handler to use the Git config username
 await new Command()
@@ -17,11 +19,12 @@ await new Command()
   .option("-d, --debug", "Enable debug output.")
   .arguments("[path:string]")
   .option("--siteRoot <siteRoot:string>", "Specify the site root URL.")
+  .option("-o, --output <output:string>", "Specify the output directory where the site files will be generated.")
+  .option("--src <src:string>", "Specify the source directory where the SFDataRepos and other RDF data will live.")
   .description("Initialize a new SFRootRepo at the given path.")
   .action(async (options, path, siteRoot) => {
     if (options.debug) {
       console.log('Debug: Passed-in Path value:', path);
-      console.log('Debug: Passed-in siteRoot value:', siteRoot);
       console.log('Debug: Options received:', options);
     }
     
@@ -41,7 +44,7 @@ await new Command()
     }
 
     // Infer site root if not provided
-    if (!siteRoot) {
+    if (!options.siteRoot) {
       if (existsSync(`${path}/.git`)) {
         try {
           const gitConfigPath = `${path}/.git/config`;
@@ -78,29 +81,37 @@ await new Command()
         console.log("Warning: Site root not provided and could not be inferred.");
       }
 
-      siteRoot = siteRoot || DEFAULT_SITEROOT;
-    }
-
-    if (!options.siteRoot) {
+      siteRoot = siteRoot || DEFAULT_SITEROOT + rootRepoName;
       siteRoot = await Input.prompt({ message: "Enter the site root URL:", default: siteRoot });
-    } else {
-      siteRoot = options.siteRoot;
-    }
-      if (options.debug) { {
+
+      } else {
+        siteRoot = options.siteRoot;
+      }
+      
+      if (options.debug) { 
       console.log('Debug: final siteRoot:', siteRoot);
       console.log('Debug: rootRepoName:', rootRepoName);
     }
 
     await ensureDir(path);
-    const docsDir = `${path}/docs`;
-    await ensureDir(docsDir);
-    await ensureDir(`${docsDir}/_assets`);
-    const srcDir = `${path}/src`;
-    await ensureDir(srcDir);
+    const configPath = `${path}/config.jsonld`;
+    let outputDir = options.output || DEFAULT_OUTPUT_DIRNAME;
+    if (!existsSync(configPath)) {
+      outputDir = await Input.prompt({ message: "Enter the output directory:", default: outputDir });
+    }
+    const outputPath = `${path}/${outputDir}`;
+        await ensureDir(outputPath);
+        await ensureDir(`${outputPath}/_assets`);
+        let srcDir = options.src || DEFAULT_SRC_DIRNAME;
+    if (!existsSync(configPath)) {
+      srcDir = await Input.prompt({ message: "Enter the source directory:", default: srcDir });
+    }
+    const srcPath = `${path}/${srcDir}`;
+    await ensureDir(srcPath);
+
     const templateDir = `${path}/templates`;
     await ensureDir(templateDir);
     
-    const configPath = `${path}/config.jsonld`;
     let writeConfig = false;
 
     if (existsSync(configPath)) {
@@ -114,8 +125,8 @@ await new Command()
       const siteDescription = await Input.prompt({ message: "Enter a description for the Semantic Flow site:", default: "A Semantic Flow site." });
       
       // Use the function to get the GitHub username from local git config
-      let creator = await getGitConfig("user.name");
-      creator = creator || getGitConfig("user.email");
+      let creator = await getGitConfig(options,"user.name");
+      creator = creator || getGitConfig(options,"user.email");
 
       if (!creator && siteRoot && siteRoot.includes("github.io")) {
         const userMatch = siteRoot.match(/https:\/\/([^\.]+)\.github\.io/);
@@ -124,21 +135,21 @@ await new Command()
         }
       }
 
-      creator = await Input.prompt({ message: "Enter the creator name (default inferred from Git repository username/orgname):", default: creator });
+      creator = await Input.prompt({ message: "Enter the creator name (default inferred from Git repository user.name or else user.email):", default: creator });
       const responses = { siteDescription, creator };
 
       const config = {
         "@context": {
+          "@base": siteRoot,
           "sflo": "http://semantic-flow.github.io/ontology/",
           "dc": "http://purl.org/dc/elements/1.1/",
-          "@base": siteRoot
         },
         "@id": "",
         "@type": "sflo:SemanticFlowSite",
         "sflo:siteDescription": responses.siteDescription,
         "dc:creator": responses.creator,
-        "sflo:hasSourceFolder": "src",
-        "sflo:hasOutputFolder": "docs"
+        "sflo:hasSourceFolder": srcDir,
+        "sflo:hasOutputFolder": outputDir
       };
 
       await Deno.writeTextFile(configPath, JSON.stringify(config, null, 2));
@@ -148,30 +159,28 @@ await new Command()
     }
 
     console.log(green(`SFRootRepo initialized successfully at ${bold(path)}`));
-    if (siteRoot !== DEFAULT_SITEROOT) {
-      console.log(green(`Site Root: ${bold(siteRoot)}`));
-    }
   })
   .parse(Deno.args);
 
 
-// Define the function to get the GitHub username from git config
-async function getGitConfig(key) {
+// Define the function to get the GitHub config values from git config
+async function getGitConfig(options,key) {
   try {
-    const process = Deno.run({
-      cmd: ["git", "config", "--get", key],
-      stdout: "piped",
-      stderr: "piped",
+    const command = new Deno.Command("git", {
+        args: ["config", "--get", key]
     });
-    const output = await process.output(); // Get the output from stdout
+    const {success, stdout} = await command.output(); // Get the output from stdout
     const decoder = new TextDecoder();
-    const username = decoder.decode(output).trim();
-    
-    if (username) {
-      return username;
+    const result = decoder.decode(stdout).trim();
+    if (options.debug) {
+      success ? console.log(`Debug: Git ${key} retrieved: ${result}`) : console.log(`Debug: Git ${key} NOT retrieved`)
+    }
+
+    if (result) {
+      return result;
     }
   } catch (error) {
-    console.error("Warning: Could not retrieve Git user name from local config.", error);
+    console.error(`Warning: Could not retrieve Git {$key} from local config.`, error);
   }
-  return "unknown"; // Return "unknown" if there's an error or no username is set
+  return false; // Return false if there's an error or no corresponding key is found
 }
